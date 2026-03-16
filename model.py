@@ -7,12 +7,12 @@ from google import genai
 
 load_dotenv() 
 
-def embed(phrase):
+def embed(client, phrase):
     result = client.models.embed_content(
         model="gemini-embedding-001",
-        contents="What is the meaning of life?"
+        contents=phrase
     )
-    return result.embeddings
+    return result.embeddings[0].values
 
 def load_model():
     # Use SentenceTransformer to load BGE-M3. It's the same model, 
@@ -22,22 +22,33 @@ def load_model():
     print("Models Loaded Successfully")
     return nli_model, sim_model
 
-def inference(models, phrase, relevant_paragraph):
+def similarity(client, models, phrase, phrase1):
+    (_, sim_model) = models
+    
+    phrase_vec = embed(client, phrase)
+    paper_vec = embed(client, phrase1)
+
+    similarity = np.dot(phrase_vec, paper_vec)
+    print(f"\nTopic Similarity Score: {similarity:.4f}")
+
+    return similarity 
+
+
+def inference(client, models, phrase, relevant_paragraph):
     (nli_model, sim_model) = models
     
     # 1. Generate Embeddings using SentenceTransformer
-    phrase_vec = sim_model.encode([phrase])
-    paper_vec = sim_model.encode([relevant_paragraph])
+    phrase_vec = embed(client, phrase)
+    paper_vec = embed(client, relevant_paragraph)
 
     # 2. Calculate Cosine Similarity
     # sentence-transformers outputs are usually normalized, so dot product works
-    similarity = np.dot(phrase_vec[0], paper_vec[0])
+    similarity = np.dot(phrase_vec, paper_vec)
     print(f"\nTopic Similarity Score: {similarity:.4f}")
 
     if similarity < 0.6: # Adjusted threshold slightly
-        print("Irrelevant.")
         #print("Verdict: Neutral (The paper doesn't talk about this topic.)")
-        return
+        return -1
 
     #print("Topic is relevant. Proceeding to logic check...")
         
@@ -46,7 +57,7 @@ def inference(models, phrase, relevant_paragraph):
     probabilities = torch.nn.functional.softmax(torch.tensor(logits), dim=1).numpy()[0]
 
     # Deberta NLI Labels: 0: Contradiction, 1: Neutral, 2: Entailment
-    labels = ['contradicts', 'ftg fdp', 'entails']
+    labels = ['contradicts', 'fneutral', 'entails']
 
     # for label, prob in zip(labels, probabilities):
     #     print(f"{label}: {prob:.2%}")
@@ -58,26 +69,45 @@ def inference(models, phrase, relevant_paragraph):
     else:
         verdict = labels[np.argmax(probabilities)]
 
-    print(f"The phrase '{phrase}' {verdict} '{relevant_paragraph}'.")
 
-def split_to_atoms(text):
+
+    print(f"The phrase '{phrase}' {verdict} '{relevant_paragraph}'.")
+    return np.argmax(probabilities)
+
+def split_to_atoms(client, text):
     response = client.models.generate_content(
         model="gemini-2.5-flash", contents=f"{os.getenv("ATOM_SPLIT_PROMPT")}\n\n{text}"
     )
     return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
 
-client = genai.Client()
+def extract_keywords(client, text):
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", contents=f"{os.getenv("KEYWORDS_PROMPT")}\n\n{text}"
+    )
+    print(response.text)
+    return response.text
+    #return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
 
-models = load_model()
+def main():
 
-paragraph = """Hydrogels do not have dynamic cues. Hydrogels do not have structural complexity. These factors limit their function."""
+    client = genai.Client()
 
-while True:
-    user_phrase = input("\nEnter phrase to test: ")
-    if user_phrase.lower() in ['exit', 'quit']: break
-    user_claims = split_to_atoms(user_phrase)
-    paper_claims = split_to_atoms(paragraph)
+    models = load_model()
 
-    for user_claim in user_claims:
-        for paper_claim in paper_claims:
-            inference(models, user_claim, paper_claim)
+    paragraph = """Hydrogels do not have dynamic cues. Hydrogels do not have structural complexity. These factors limit their function."""
+
+    while True:
+        user_phrase = input("\nEnter phrase to test: ")
+        if user_phrase.lower() in ['exit', 'quit']: break
+        user_claims = split_to_atoms(client, user_phrase)
+        paper_claims = split_to_atoms(client, paragraph)
+
+        results = []
+        for user_claim in user_claims:
+            for paper_claim in paper_claims:
+                result = inference(client, models, user_claim, paper_claim)
+                results.append(result)
+
+if __name__ == "__main__":
+    main()
+
