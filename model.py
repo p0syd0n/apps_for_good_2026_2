@@ -14,9 +14,15 @@ def embed(client, phrase):
     )
     return result.embeddings[0].values
 
+def get_llm():
+    return genai.Client()
+
+def use_llm(client, content):
+    return client.models.generate_content(
+        model="gemini-2.5-flash", contents=content
+    )
+    
 def load_model():
-    # Use SentenceTransformer to load BGE-M3. It's the same model, 
-    # but uses a more stable loading pathway.
     sim_model = SentenceTransformer('BAAI/bge-m3')
     nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
     print("Models Loaded Successfully")
@@ -41,22 +47,19 @@ def inference(client, models, phrase, relevant_paragraph):
     phrase_vec = embed(client, phrase)
     paper_vec = embed(client, relevant_paragraph)
 
-    # 2. Calculate Cosine Similarity
-    # sentence-transformers outputs are usually normalized, so dot product works
+    # 2.  dot product for simularity
     similarity = np.dot(phrase_vec, paper_vec)
     print(f"\nTopic Similarity Score: {similarity:.4f}")
 
-    if similarity < 0.6: # Adjusted threshold slightly
+    if similarity < 0.6:
         #print("Verdict: Neutral (The paper doesn't talk about this topic.)")
         return -1
 
-    #print("Topic is relevant. Proceeding to logic check...")
-        
-    # 4. Logical Inference
+    # NLI 
     logits = nli_model.predict([(phrase, relevant_paragraph)])
     probabilities = torch.nn.functional.softmax(torch.tensor(logits), dim=1).numpy()[0]
 
-    # Deberta NLI Labels: 0: Contradiction, 1: Neutral, 2: Entailment
+    # 0: Contradiction, 1: Neutral, 2: Entailment
     labels = ['contradicts', 'fneutral', 'entails']
 
     # for label, prob in zip(labels, probabilities):
@@ -65,9 +68,9 @@ def inference(client, models, phrase, relevant_paragraph):
     # 5. Final Verdict Logic
     max_prob = np.max(probabilities)
     if max_prob < 0.60:
-        verdict = "Neutral (Inconclusive/Mixed Evidence)"
+        verdict = 1
     else:
-        verdict = labels[np.argmax(probabilities)]
+        verdict = np.argmax(probabilities)
 
 
 
@@ -77,6 +80,12 @@ def inference(client, models, phrase, relevant_paragraph):
 def split_to_atoms(client, text):
     response = client.models.generate_content(
         model="gemini-2.5-flash", contents=f"{os.getenv("ATOM_SPLIT_PROMPT")}\n\n{text}"
+    )
+    return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
+
+def get_abstract_atoms(client, text):
+    response = client.models.generate_content(
+        model="gemini-2.5-flash", contents=f"{os.getenv("GET_ABSTRACT_ATOMS_PROMPT")}\n\n{text}"
     )
     return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
 
@@ -90,7 +99,7 @@ def extract_keywords(client, text):
 
 def main():
 
-    client = genai.Client()
+    client = get_llm()
 
     models = load_model()
 
