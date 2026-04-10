@@ -1,122 +1,120 @@
-from sentence_transformers import SentenceTransformer, CrossEncoder
+"""
+Fact-checking / NLI inference pipeline.
+All LLM/embedding calls go through an LLMProvider tp swap providers freely.
+"""
+
 import numpy as np
 import torch
 import os
-from dotenv import load_dotenv
-from google import genai
-
-load_dotenv() 
-
-def embed(client, phrase):
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=phrase
-    )
-    return result.embeddings[0].values
-
-def get_llm():
-    return genai.Client()
-
-def use_llm(client, content):
-    return client.models.generate_content(
-        model="gemini-2.5-flash", contents=content
-    )
-    
-def load_model():
-    sim_model = SentenceTransformer('BAAI/bge-m3')
-    nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
-    print("Models Loaded Successfully")
-    return nli_model, sim_model
-
-def similarity(client, models, phrase, phrase1):
-    (_, sim_model) = models
-    
-    phrase_vec = embed(client, phrase)
-    paper_vec = embed(client, phrase1)
-
-    similarity = np.dot(phrase_vec, paper_vec)
-    print(f"\nTopic Similarity Score: {similarity:.4f}")
-
-    return similarity 
+from sentence_transformers import CrossEncoder
+from llm_providers import LLMProvider, get_provider
 
 
-def inference(client, models, phrase, relevant_paragraph):
-    (nli_model, sim_model) = models
-    
-    # 1. Generate Embeddings using SentenceTransformer
-    phrase_vec = embed(client, phrase)
-    paper_vec = embed(client, relevant_paragraph)
 
-    # 2.  dot product for simularity
-    similarity = np.dot(phrase_vec, paper_vec)
-    print(f"\nTopic Similarity Score: {similarity:.4f}")
+# Model loading (local NLI model only)
 
-    if similarity < 0.6:
-        #print("Verdict: Neutral (The paper doesn't talk about this topic.)")
+def load_nli_model() -> CrossEncoder:
+    model = CrossEncoder("cross-encoder/nli-deberta-v3-base")
+    print("NLI model loaded.")
+    return model
+
+
+# Embedding helpers (provider-agnostic)
+
+def similarity(provider: LLMProvider, a: str, b: str) -> float:
+    """Cosine-equivalent dot product between two embedded strings."""
+    score = float(np.dot(provider.embed(a), provider.embed(b)))
+    print(f"Similarity: {score:.4f}")
+    return score
+
+
+# NLI inference
+
+LABELS = ["contradicts", "neutral", "entails"]
+SIMILARITY_THRESHOLD = 0.60
+CONFIDENCE_THRESHOLD = 0.60
+
+#     Returns an index into LABELS: 0=contradicts, 1=neutral, 2=entails.
+def run_nli(nli_model: CrossEncoder, premise: str, hypothesis: str) -> int:
+    """
+    Returns an index into LABELS: 0=contradicts, 1=neutral, 2=entails.
+    """
+    logits = nli_model.predict([(premise, hypothesis)])
+    probs  = torch.nn.functional.softmax(torch.tensor(logits), dim=1).numpy()[0]
+    return int(np.argmax(probs)) if np.max(probs) >= CONFIDENCE_THRESHOLD else 1
+
+# make a NLI inference between two statements
+def inference(
+    provider:  LLMProvider,
+    nli_model: CrossEncoder,
+    claim:     str,
+    context:   str,
+) -> int:
+    """
+    Compare `claim` against `context`.
+
+    Returns:
+        -1  topic mismatch (similarity below threshold)
+         0  contradicts
+         1  neutral / uncertain
+         2  entails
+    """
+    if similarity(provider, claim, context) < SIMILARITY_THRESHOLD:
         return -1
 
-    # NLI 
-    logits = nli_model.predict([(phrase, relevant_paragraph)])
-    probabilities = torch.nn.functional.softmax(torch.tensor(logits), dim=1).numpy()[0]
-
-    # 0: Contradiction, 1: Neutral, 2: Entailment
-    labels = ['contradicts', 'fneutral', 'entails']
-
-    # for label, prob in zip(labels, probabilities):
-    #     print(f"{label}: {prob:.2%}")
-
-    # 5. Final Verdict Logic
-    max_prob = np.max(probabilities)
-    if max_prob < 0.60:
-        verdict = 1
-    else:
-        verdict = np.argmax(probabilities)
+    verdict = run_nli(nli_model, claim, context)
+    print(f"  [{LABELS[verdict]}]  '{claim}'  vs  '{context}'")
+    return verdict
 
 
+# Text splitting (provider-agnostic prompts)
 
-    print(f"The phrase '{phrase}' {verdict} '{relevant_paragraph}'.")
-    return np.argmax(probabilities)
+def split_to_atoms(provider: LLMProvider, text: str) -> list[str]:
+    prompt   = os.getenv("ATOM_SPLIT_PROMPT", "Split the following text into atomic factual claims, one per line:")
+    response = provider.generate(prompt=text, system=prompt)
+    return [c.replace("\n", "").strip() for c in response.split(".") if c.strip()]
 
-def split_to_atoms(client, text):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", contents=f"{os.getenv("ATOM_SPLIT_PROMPT")}\n\n{text}"
-    )
-    return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
 
-def get_abstract_atoms(client, text):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", contents=f"{os.getenv("GET_ABSTRACT_ATOMS_PROMPT")}\n\n{text}"
-    )
-    return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
+def get_abstract_atoms(provider: LLMProvider, text: str) -> list[str]:
+    prompt   = os.getenv("GET_ABSTRACT_ATOMS_PROMPT", "Extract the key abstract claims from this text, one per line:")
+    response = provider.generate(prompt=text, system=prompt)
+    return [c.replace("\n", "").strip() for c in response.split(".") if c.strip()]
 
-def extract_keywords(client, text):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", contents=f"{os.getenv("KEYWORDS_PROMPT")}\n\n{text}"
-    )
-    print(response.text)
-    return response.text
-    #return [claim.replace("\n", "") for claim in response.text.split(".") if len(claim)!=0]
+
+def extract_keywords(provider: LLMProvider, text: str) -> str:
+    prompt   = os.getenv("KEYWORDS_PROMPT", "Extract the key terms and concepts from this text as a comma-separated list:")
+    response = provider.generate(prompt=text, system=prompt)
+    print(response)
+    return response
+
+
+# tests
 
 def main():
+    provider  = get_provider("gemini")
+    nli_model = load_nli_model()
 
-    client = get_llm()
-
-    models = load_model()
-
-    paragraph = """Hydrogels do not have dynamic cues. Hydrogels do not have structural complexity. These factors limit their function."""
+    paragraph = (
+        "Hydrogels do not have dynamic cues. "
+        "Hydrogels do not have structural complexity. "
+        "These factors limit their function."
+    )
 
     while True:
-        user_phrase = input("\nEnter phrase to test: ")
-        if user_phrase.lower() in ['exit', 'quit']: break
-        user_claims = split_to_atoms(client, user_phrase)
-        paper_claims = split_to_atoms(client, paragraph)
+        user_phrase = input("\nEnter phrase to test (or 'exit'): ").strip()
+        if user_phrase.lower() in ("exit", "quit"):
+            break
 
-        results = []
-        for user_claim in user_claims:
-            for paper_claim in paper_claims:
-                result = inference(client, models, user_claim, paper_claim)
-                results.append(result)
+        user_claims  = split_to_atoms(provider, user_phrase)
+        paper_claims = split_to_atoms(provider, paragraph)
+
+        results = [
+            inference(provider, nli_model, uc, pc)
+            for uc in user_claims
+            for pc in paper_claims
+        ]
+        print(f"\nResult vector: {results}")
+
 
 if __name__ == "__main__":
     main()
-

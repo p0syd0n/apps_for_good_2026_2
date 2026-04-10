@@ -3,8 +3,11 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
+# Get papers from google scholar using SerpAPI
 def get_papers(query):
-
+    """
+    Returns { title, link }
+    """
     client = serpapi.Client(api_key=os.getenv("API_KEY")) 
 
     results = client.search(engine='google', q=query)
