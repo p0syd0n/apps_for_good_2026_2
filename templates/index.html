@@ -1,9 +1,110 @@
-<html>
-    <head>
-        <title>Hello</title>
-        <script src="static/index.js"></script>
-    </head>
-    <body>
-        <h1>Hello, world</h1>
-    </body>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Scholar Search</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 2rem 1rem; }
+    h1 { font-size: 1.6rem; margin-bottom: 1.5rem; color: #a78bfa; }
+    .search-row { display: flex; gap: .5rem; width: 100%; max-width: 640px; }
+    input { flex: 1; padding: .6rem 1rem; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 1rem; }
+    button { padding: .6rem 1.4rem; border-radius: 8px; border: none; background: #7c3aed; color: #fff; font-size: 1rem; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* Progress */
+    #progress-box { width: 100%; max-width: 640px; margin-top: 1.5rem; display: none; }
+    .bar-track { height: 8px; background: #1e293b; border-radius: 4px; overflow: hidden; margin-bottom: .5rem; }
+    .bar-fill { height: 100%; background: #7c3aed; border-radius: 4px; transition: width .3s ease; width: 0%; }
+    #pct-label { font-size: .8rem; color: #94a3b8; }
+    #log { margin-top: .5rem; font-size: .78rem; color: #64748b; max-height: 120px; overflow-y: auto; }
+    #log div { padding: 1px 0; }
+
+    /* Results */
+    #results { width: 100%; max-width: 640px; margin-top: 2rem; display: flex; flex-direction: column; gap: 1rem; }
+    .card { background: #1e293b; border-radius: 10px; padding: 1rem 1.2rem; border: 1px solid #334155; }
+    .card-title { font-weight: 600; color: #e2e8f0; margin-bottom: .3rem; }
+    .card-title a { color: #a78bfa; text-decoration: none; }
+    .card-title a:hover { text-decoration: underline; }
+    .card-meta { font-size: .78rem; color: #64748b; margin-bottom: .5rem; }
+    .card-abstract { font-size: .85rem; color: #94a3b8; line-height: 1.55; }
+    .badge { display: inline-block; background: #312e81; color: #a5b4fc; font-size: .72rem; padding: 2px 7px; border-radius: 99px; margin-left: .4rem; }
+  </style>
+</head>
+<body>
+  <h1>Scholar Search</h1>
+
+  <div class="search-row">
+    <input id="query" type="text" placeholder="e.g. transformer attention mechanisms" />
+    <button id="btn" onclick="runSearch()">Search</button>
+  </div>
+
+  <div id="progress-box">
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+    <div id="pct-label">0%</div>
+    <div id="log"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <script>
+    const socket = io();
+
+    socket.on("progress", ({ message, pct }) => {
+      document.getElementById("bar").style.width = pct + "%";
+      document.getElementById("pct-label").textContent = pct + "%";
+      const log = document.getElementById("log");
+      const line = document.createElement("div");
+      line.textContent = message;
+      log.appendChild(line);
+      log.scrollTop = log.scrollHeight;
+    });
+
+    socket.on("result", ({ papers }) => {
+      document.getElementById("btn").disabled = false;
+      const container = document.getElementById("results");
+      container.innerHTML = "";
+      if (!papers.length) {
+        container.innerHTML = "<p style='color:#64748b'>No matching papers found.</p>";
+        return;
+      }
+      papers.forEach(p => {
+        const authors = p.authors.slice(0, 3).join(", ") + (p.authors.length > 3 ? " et al." : "");
+        const abstract = p.abstract
+          ? p.abstract.slice(0, 300) + (p.abstract.length > 300 ? "…" : "")
+          : "<em>No abstract available</em>";
+        container.innerHTML += `
+          <div class="card">
+            <div class="card-title">
+              <a href="${p.url}" target="_blank">${p.title}</a>
+              <span class="badge">${(p.similarity * 100).toFixed(0)}% match</span>
+            </div>
+            <div class="card-meta">${authors}${p.year ? " · " + p.year : ""}</div>
+            <div class="card-abstract">${abstract}</div>
+          </div>`;
+      });
+    });
+
+    function runSearch() {
+      const query = document.getElementById("query").value.trim();
+      if (!query) return;
+
+      // Reset UI
+      document.getElementById("btn").disabled = true;
+      document.getElementById("bar").style.width = "0%";
+      document.getElementById("pct-label").textContent = "0%";
+      document.getElementById("log").innerHTML = "";
+      document.getElementById("results").innerHTML = "";
+      document.getElementById("progress-box").style.display = "block";
+
+      socket.emit("run_inference", { query });
+    }
+
+    document.getElementById("query").addEventListener("keydown", e => {
+      if (e.key === "Enter") runSearch();
+    });
+  </script>
+</body>
 </html>

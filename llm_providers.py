@@ -98,18 +98,60 @@ class OpenAIProvider(LLMProvider):
         )
         return response.choices[0].message.content
 
+class OllamaProvider(LLMProvider):
+    """
+    Jina AI for embeddings + Groq for generation.
+    """
+    GEN_MODEL   = "llama-3.1-8b-instant"
+    EMBED_MODEL = "jina-embeddings-v2-base-en"
+
+    def __init__(self):
+        import requests
+        from openai import OpenAI
+
+        self._requests  = requests
+        self._groq = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.getenv("GROQ_API_KEY"),
+        )
+
+    def embed(self, text: str) -> list[float]:
+        response = self._requests.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.getenv('JINA_API_KEY')}",
+            },
+            json={"model": self.EMBED_MODEL, "input": [text]},
+        )
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+
+    def generate(self, prompt: str, system: Optional[str] = None) -> str:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        response = self._groq.chat.completions.create(
+            model=self.GEN_MODEL,
+            messages=messages,
+        )
+        return response.choices[0].message.content
 
 # get one of the providers
 def get_provider(name: Optional[str] = None) -> LLMProvider:
     """
-    Return a provider instance.  Priority:
-      1. `name` argument
-      2. LLM_PROVIDER env var
-      3. 'gemini' default
+    Return a provider instance. Priority:
+    1. name argument
+    2. LLM_PROVIDER env var
+    3. 'gemini' default
     """
     name = (name or os.getenv("LLM_PROVIDER", "gemini")).lower()
     match name:
         case "gemini":  return GeminiProvider()
         case "claude":  return ClaudeProvider()
         case "openai":  return OpenAIProvider()
-        case _: raise ValueError(f"Unknown provider: {name!r}. Choose gemini | claude | openai")
+        case "ollama":  return OllamaProvider()
+        case _: 
+            raise ValueError(f"Unknown provider: {name!r}. Choose gemini | claude | openai | ollama")

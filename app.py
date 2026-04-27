@@ -1,78 +1,84 @@
-#main app file
-#import libraries
-from flask import Flask, request, render_template
+from flask import Flask, render_template
+from flask_socketio import SocketIO, emit
 import llm_providers
 import scholar
-import requests
-import re
 import model
 from dotenv import load_dotenv
-
-# Allow for usage of api keys in .env
+import os
 load_dotenv()
 
-# Max number of papers used
 N_PAPERS = 5
-
-# Create the flask app
 app = Flask(__name__)
-provider = llm_providers.get_provider("gemini")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
-# Test route
-@app.route('/')
+provider = llm_providers.get_provider("ollama")
+print("Provider loaded: ollama")
+
+
+@app.route("/")
 def main():
-    print("Main hit")
     return render_template("index.html")
 
-# Inference route
-@app.route("/inference")
-def inference():
-    # Retrieve query
-    query = request.args["query"]
-    # Extract individual keywords
-    keywords = model.extract_keywords(provider, query)
-    # Get the papers for these keywords
-    papers = scholar.get_papers(keywords)
-    # Split the query to individual atoms
-    query_atoms = model.split_to_atoms(provider, query)
 
-    # Create the list of papers which are relevant (query atom vs paper title)
-    # Sorted by similarity, ascending
+@socketio.on("run_inference")
+def inference(data):
+    query = data.get("query", "")
+
+    def progress(message, pct):
+        emit("progress", {"message": message, "pct": pct})
+
+    progress("Extracting keywords…", 5)
+    keywords = model.extract_keywords(provider, query)
+
+    progress(f"Searching Semantic Scholar for: {keywords}", 15)
+    papers = scholar.get_papers(keywords)
+    progress(f"Found {len(papers)} papers", 30)
+
+    query_atoms = model.split_to_atoms(provider, query)
+    progress(f"Split query into {len(query_atoms)} atoms", 40)
+
     papers_to_use = []
+    total = len(papers) * len(query_atoms)
+    done = 0
+
     for paper in papers:
         for query_atom in query_atoms:
-            similarity = model.similarity(provider, query_atom, paper["title"])
+            # Compare atom against the abstract (falls back to title if absent)
+            target_text = paper.get("abstract") or paper["title"]
+            similarity = model.similarity(provider, query_atom, target_text)
             if similarity > 0.6:
-                paper["similarity"] = similarity
-                papers_to_use.append(paper)
+                paper["similarity"] = max(paper.get("similarity", 0), similarity)
+                if paper not in papers_to_use:
+                    papers_to_use.append(paper)
 
-    # Sort
+            done += 1
+            pct = 40 + int((done / total) * 45)  # 40 → 85 %
+            progress(
+                f"Scoring '{paper['title'][:40]}…' vs atom '{query_atom}'  ({similarity:.2f})",
+                pct,
+            )
+
     papers_to_use.sort(key=lambda d: d["similarity"], reverse=True)
+    papers_to_use = papers_to_use[:N_PAPERS]
 
-    # Cut to max number of papers
-    if len(papers_to_use) > N_PAPERS:
-        papers_to_use = papers_to_use[:N_PAPERS]
+    progress(f"Ranked top {len(papers_to_use)} papers", 90)
 
-    # Fetch HTML and immediately extract PDF links
-    pdf_links = []
-    for paper in papers_to_use:
-        print(paper["title"] + " : " + paper["link"])
-        try:
-            # Fetch the HTML content directly into memory
-            content = requests.get(paper["link"]).content.decode('utf-8')
-            # Find all PDF links in the content (both single and double quoted)
-            found_links = re.findall(r'''["'](https?://[^"']*\.pdf)["']''', content)
-            pdf_links.extend(found_links)
-            print(f"{paper['title']} ({paper['link']}): found {len(found_links)} PDF link(s)")
-            print(model.get_abstract_atoms(provider, content))
-            # Save the PDF links to papers/
-            if found_links:
-                safe_title = re.sub(r'[^\w\s-]', '', paper['title'])[:100]
-                with open(f"papers/{safe_title}.txt", "w") as f:
-                    f.write("\n".join(found_links))
-        except Exception as e:
-            print("Problem with request/parse: " + str(e))
+    results = [
+        {
+            "title": p["title"],
+            "abstract": p.get("abstract", ""),
+            "url": p.get("url", ""),
+            "year": p.get("year"),
+            "authors": p.get("authors", []),
+            "similarity": round(p["similarity"], 3),
+        }
+        for p in papers_to_use
+    ]
 
-    return "200"
+    progress("Done!", 100)
+    emit("result", {"papers": results})
 
-app.run(host='0.0.0.0', port=8080, debug=True)
+
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=8080, debug=True)
