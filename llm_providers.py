@@ -141,12 +141,7 @@ class OllamaProvider(LLMProvider):
 
 # get one of the providers
 def get_provider(name: Optional[str] = None) -> LLMProvider:
-    """
-    Return a provider instance. Priority:
-    1. name argument
-    2. LLM_PROVIDER env var
-    3. 'gemini' default
-    """
+
     name = (name or os.getenv("LLM_PROVIDER", "gemini")).lower()
     match name:
         case "gemini":  return GeminiProvider()
